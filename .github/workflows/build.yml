@@ -29,20 +29,80 @@ jobs:
           tar -xzf clang.tar.gz -C $HOME/clang
           rm clang.tar.gz
 
-      - name: Integrate KernelSU Next (legacy 4.19) + Manual Hooks
+      - name: Integrate KernelSU Next (legacy 4.19) + Manual Hooks + path_umount
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
           chmod +x syscall_hook_patches.sh
           ./syscall_hook_patches.sh
 
+          python3 - << 'EOF'
+          with open("fs/namespace.c", "r") as f:
+              content = f.read()
+
+          if "int path_umount(" not in content:
+              patch = """
+          static int can_umount(const struct path *path, int flags)
+          {
+          \tstruct mount *mnt = real_mount(path->mnt);
+
+          \tif (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+          \t\treturn -EINVAL;
+          \tif (!may_mount())
+          \t\treturn -EPERM;
+          \tif (path->dentry != path->mnt->mnt_root)
+          \t\treturn -EINVAL;
+          \tif (!check_mnt(mnt))
+          \t\treturn -EINVAL;
+          \tif (mnt->mnt.mnt_flags & MNT_LOCKED)
+          \t\treturn -EINVAL;
+          \tif (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+          \t\treturn -EPERM;
+          \treturn 0;
+          }
+
+          int path_umount(struct path *path, int flags)
+          {
+          \tstruct mount *mnt = real_mount(path->mnt);
+          \tint ret;
+
+          \tret = can_umount(path, flags);
+          \tif (!ret)
+          \t\tret = do_umount(mnt, flags);
+
+          \tdput(path->dentry);
+          \tmntput_no_expire(mnt);
+          \treturn ret;
+          }
+
+          """
+              for anchor in ["int ksys_umount(", "SYSCALL_DEFINE2(umount,"]:
+                  if anchor in content:
+                      content = content.replace(anchor, patch + anchor, 1)
+                      with open("fs/namespace.c", "w") as f:
+                          f.write(content)
+                      print(f"path_umount inserido antes de {anchor}")
+                      break
+              else:
+                  raise RuntimeError("Âncora de umount não encontrada em fs/namespace.c")
+
+          with open("fs/internal.h", "r") as f:
+              hdr = f.read()
+
+          if "path_umount(" not in hdr:
+              anchor = "extern void __init mnt_init(void);"
+              if anchor in hdr:
+                  hdr = hdr.replace(anchor, anchor + "\nint path_umount(struct path *path, int flags);", 1)
+              else:
+                  hdr += "\nint path_umount(struct path *path, int flags);\n"
+              with open("fs/internal.h", "w") as f:
+                  f.write(hdr)
+              print("Declaração path_umount adicionada em fs/internal.h")
+          EOF
+
       - name: Configure Kernel (r8q + KSU Next Manual Hook)
         run: |
           export PATH="$HOME/clang/bin:$PATH"
-
-          echo "=== Configs disponíveis ==="
-          ls -la arch/arm64/configs/vendor/ || true
-          ls -la arch/arm64/configs/vendor/samsung/ || true
 
           BASE_DEFCONFIG=""
           for cfg in \
