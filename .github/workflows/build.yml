@@ -29,25 +29,63 @@ jobs:
           tar -xzf clang.tar.gz -C $HOME/clang
           rm clang.tar.gz
 
-      - name: Integrate KernelSU Next (legacy 4.19)
+      - name: Integrate KernelSU Next (legacy 4.19) + Manual Hooks
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          curl -LSs "https://raw.githubusercontent.com/JackA1ltman/NonGKI_Kernel_Build_2nd/mainline/Patches/syscall_hook_patches.sh" -o syscall_hook_patches.sh
+          chmod +x syscall_hook_patches.sh
+          ./syscall_hook_patches.sh
 
-      - name: Configure Kernel (r8q + KSU Next)
+      - name: Configure Kernel (r8q + KSU Next Manual Hook)
         run: |
           export PATH="$HOME/clang/bin:$PATH"
-          EXTRA_CFG=""
-          [ -f arch/arm64/configs/vendor/debugfs.config ] && EXTRA_CFG="vendor/debugfs.config"
+
+          echo "=== Configs disponíveis ==="
+          ls -la arch/arm64/configs/vendor/ || true
+          ls -la arch/arm64/configs/vendor/samsung/ || true
+
+          BASE_DEFCONFIG=""
+          for cfg in \
+            vendor/kona-sec-perf_defconfig \
+            vendor/kona-perf_defconfig \
+            vendor/kona-sec_defconfig \
+            vendor/kona_defconfig \
+            kona-perf_defconfig \
+            kona_defconfig; do
+            if [ -f "arch/arm64/configs/$cfg" ]; then
+              BASE_DEFCONFIG="$cfg"
+              break
+            fi
+          done
+
+          if [ -z "$BASE_DEFCONFIG" ]; then
+            echo "ERRO: Nenhum defconfig kona encontrado!"
+            exit 1
+          fi
+
+          FRAGMENTS=""
+          for frag in \
+            vendor/debugfs.config \
+            vendor/samsung/sm8250-common.config \
+            vendor/samsung/kona-sec-common.config \
+            vendor/samsung/r8q.config; do
+            if [ -f "arch/arm64/configs/$frag" ]; then
+              FRAGMENTS="$FRAGMENTS $frag"
+            fi
+          done
+
+          echo ">>> Usando: $BASE_DEFCONFIG $FRAGMENTS"
 
           make O=out ARCH=arm64 \
             CC=clang LLVM=1 LLVM_IAS=1 \
-            vendor/kona-sec-perf_defconfig $EXTRA_CFG vendor/samsung/r8q.config
+            $BASE_DEFCONFIG $FRAGMENTS
 
           ./scripts/config --file out/.config \
-            -e KPROBES \
-            -e KPROBE_EVENTS \
             -e KSU \
-            -e KSU_KPROBE_HOOKS
+            -e KSU_MANUAL_HOOK \
+            -d KPROBES \
+            -d KPROBE_EVENTS \
+            -d KSU_KPROBE_HOOKS
 
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
 
