@@ -1,0 +1,81 @@
+name: Build LOS 24 Kernel (r8q + KSU Next)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git \
+            libssl-dev libncurses-dev lzop zip zlib1g-dev \
+            cpio python3 wget tar zstd
+
+      - name: Setup ZyC Clang 16
+        run: |
+          mkdir -p $HOME/clang
+          CLANG_URL=$(curl -sL https://raw.githubusercontent.com/ZyCromerZ/Clang/main/Clang-16-link.txt)
+          wget -qO clang.tar.gz "$CLANG_URL"
+          tar -xzf clang.tar.gz -C $HOME/clang
+          rm clang.tar.gz
+
+      - name: Integrate KernelSU Next (legacy 4.19)
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+
+      - name: Configure Kernel (r8q + KSU Next)
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          EXTRA_CFG=""
+          [ -f arch/arm64/configs/vendor/debugfs.config ] && EXTRA_CFG="vendor/debugfs.config"
+
+          make O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            vendor/kona-sec-perf_defconfig $EXTRA_CFG vendor/samsung/r8q.config
+
+          ./scripts/config --file out/.config \
+            -e KPROBES \
+            -e KPROBE_EVENTS \
+            -e KSU \
+            -e KSU_KPROBE_HOOKS
+
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: Compile Kernel (Image)
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
+          cd AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's|block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|block=boot;|g' anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=0;/g' anykernel.sh
+          zip -r9 ../LOS24-r8q-KSUNext.zip * -x .git README.md *placeholder
+
+      - name: Upload Kernel Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: LOS24-r8q-KSUNext
+          path: LOS24-r8q-KSUNext.zip
